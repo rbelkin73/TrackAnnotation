@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DnB Structure Analyzer v0.4</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="container">
+
+    <div class="app-header">
+        <h1>DnB Structure Analyzer</h1>
+        <p class="subtitle">v0.4 — Structure + Events · Zoom · 174 BPM</p>
+    </div>
+
+    <div class="top-bar">
+        <div class="file-section">
+            <input type="file" id="fileInput" accept="audio/*" hidden>
+            <button id="loadBtn" class="btn-primary">Load Track</button>
+            <span id="fileName" class="file-name">No track loaded</span>
+        </div>
+        <div class="settings-section">
+            <label>BPM:
+                <input type="number" id="bpmInput" value="174" min="60" max="220" step="0.1">
+            </label>
+            <label>Offset:
+                <input type="number" id="offsetInput" value="0" min="-10" max="10" step="0.01">
+                s
+            </label>
+            <button id="analyzeBtn" class="btn-analyze" disabled>Analyze</button>
+        </div>
+    </div>
+
+    <div id="progressBar" class="progress-wrap hidden">
+        <div class="progress-label" id="progressLabel">Analyzing...</div>
+        <div class="progress-track">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+    </div>
+
+    <!-- Waveform -->
+    <div class="waveform-container">
+        <canvas id="waveformCanvas" height="100"></canvas>
+        <div class="waveform-overlay">
+            <div id="playhead" class="playhead"></div>
+        </div>
+    </div>
+
+    <!-- Section timeline -->
+    <div class="waveform-container section-timeline-wrap">
+        <canvas id="sectionCanvas" height="44"></canvas>
+        <div class="waveform-overlay section-overlay">
+            <div id="sectionPlayhead" class="playhead"></div>
+        </div>
+    </div>
+
+    <!-- Event timeline -->
+    <div class="waveform-container event-timeline-wrap">
+        <canvas id="eventCanvas" height="52"></canvas>
+        <div class="waveform-overlay event-overlay">
+            <div id="eventPlayhead" class="playhead"></div>
+        </div>
+    </div>
+
+    <!-- Transport -->
+    <div class="transport-bar">
+        <button id="playBtn" class="btn-play" disabled>&#9654;</button>
+        <button id="stopBtn" class="btn-stop" disabled>&#9209;</button>
+        <div class="time-display">
+            <span id="timeDisplay">0:00.000</span>
+            <span id="barDisplay">Bar 1.1</span>
+        </div>
+        <div class="zoom-info" id="zoomInfo">Zoom: 1x</div>
+    </div>
+
+    <!-- Energy graph -->
+    <div class="energy-section">
+        <div class="energy-header">
+            <span class="energy-title">Energy analysis</span>
+            <div class="legend">
+                <span class="leg-item">
+                    <span class="leg-dot" style="background:#3b82f6"></span>RMS
+                </span>
+                <span class="leg-item">
+                    <span class="leg-dot" style="background:#ef4444"></span>Sub
+                </span>
+                <span class="leg-item">
+                    <span class="leg-dot" style="background:#10b981"></span>High
+                </span>
+                <span class="leg-item">
+                    <span class="leg-dot" style="background:#f97316"></span>Flux
+                </span>
+            </div>
+        </div>
+        <canvas id="energyCanvas" height="80"></canvas>
+    </div>
+
+    <!-- Structure panel -->
+    <div class="sections-panel">
+        <div class="panel-header">
+            <h2>Structure</h2>
+            <div class="panel-actions">
+                <button id="exportJsonBtn" class="btn-primary" disabled>Export JSON</button>
+                <button id="exportCsvBtn" class="btn-secondary" disabled>Export CSV</button>
+            </div>
+        </div>
+        <div id="sectionsList" class="sections-list">
+            <div class="empty-state">Load a track and press Analyze</div>
+        </div>
+    </div>
+
+    <!-- Events panel -->
+    <div class="sections-panel" style="margin-top:16px">
+        <div class="panel-header">
+            <h2>Events</h2>
+            <div class="panel-actions">
+                <button id="addEventBtn" class="btn-secondary" disabled>+ Add at cursor</button>
+            </div>
+        </div>
+        <div id="eventsList" class="sections-list">
+            <div class="empty-state">Events will appear after analysis</div>
+        </div>
+    </div>
+
+</div>
+
+<script src="js/constants.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/waveform.js"></script>
+<script src="js/sections.js"></script>
+<script src="js/events.js"></script>
+<script src="js/export.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
