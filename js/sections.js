@@ -26,16 +26,25 @@ function extractFeatures() {
     const midBuf  = new Float32Array(total);
     const highBuf = new Float32Array(total);
 
-    let ySub = 0, yMid = 0;
+    let ySub1 = 0, ySub2 = 0;
+    let yMid1 = 0, yMid2 = 0;
+    
     for (let i = 0; i < total; i++) {
         const x  = ch[i];
-        ySub     = rcSub * ySub + (1 - rcSub) * x;
-        yMid     = rcMid * yMid + (1 - rcMid) * x;
-        subBuf[i]  = ySub;
-        midBuf[i]  = yMid - ySub;
-        highBuf[i] = x    - yMid;
+        
+        // Двойной проход для более крутого среза (псевдо 2-pole)
+        ySub1 = rcSub * ySub1 + (1 - rcSub) * x;
+        ySub2 = rcSub * ySub2 + (1 - rcSub) * ySub1;
+        
+        yMid1 = rcMid * yMid1 + (1 - rcMid) * x;
+        yMid2 = rcMid * yMid2 + (1 - rcMid) * yMid1;
+        
+        subBuf[i]  = ySub2; 
+        midBuf[i]  = yMid2 - ySub2; // Только середина
+        highBuf[i] = x - yMid2;     // Только верха
     }
-
+    
+    
     let prevSubRms = 0, prevMidRms = 0, prevHighRms = 0;
 
     for (let b = 0; b < numBlocks; b++) {
