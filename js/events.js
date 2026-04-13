@@ -373,85 +373,51 @@ function detectEvents(features, kickData) {
         }
     }
 
-    // ── risers: fixed preference for 4 bars before break or impact ──
+ // ── risers: Поиск устойчивого роста "напряжения" (Tension) ──
     {
-        const win = Math.round(sr * barDur);
-        const mono = (() => {
-            const chL = APP.audioBuffer.getChannelData(0);
-            const chR = APP.audioBuffer.numberOfChannels > 1 ? APP.audioBuffer.getChannelData(1) : chL;
-            const len = Math.min(chL.length, chR.length);
-            const out = new Float32Array(len);
-            for (let i = 0; i < len; i++) out[i] = 0.5 * (chL[i] + chR[i]);
-            return out;
-        })();
-
-        const numWins = Math.floor(mono.length / win);
-        const rcMid = Math.exp(-2 * Math.PI * 1800 / sr);
-        let yMid = 0;
-        const highBuf = new Float32Array(mono.length);
-
-        for (let i = 0; i < mono.length; i++) {
-            const x = mono[i];
-            yMid = rcMid * yMid + (1 - rcMid) * x;
-            highBuf[i] = x - yMid;
+        // Tension = (High + Mid) / (Sub + 0.1)
+        const tension = new Float32Array(numBlocks);
+        for (let b = 0; b < numBlocks; b++) {
+            tension[b] = (nHigh[b] * 0.7 + nRms[b] * 0.3) / (nSub[b] + 0.1);
         }
 
-        const highScore = new Float32Array(numWins);
-        for (let w = 0; w < numWins; w++) {
-            const s = w * win;
-            const e = Math.min(s + win, mono.length);
-            let sum = 0;
-            for (let i = s; i < e; i++) sum += Math.abs(highBuf[i]);
-            highScore[w] = sum / Math.max(1, e - s);
-        }
+        let riserStart = -1;
+        let riserLen = 0;
 
-        const nHighScore = normalize(highScore);
+        for (let b = 1; b < numBlocks; b++) {
+            // Растет ли напряжение и нет ли плотного саба/кика?
+            const isRising = tension[b] > tension[b - 1] + 0.05;
+            const noHeavyBass = nSub[b] < 0.5;
 
-        const candidateTargets = events
-            .filter(e => e.type === 'impact' || e.type === 'break')
-            .map(e => ({
-                type: e.type,
-                bar: e.bar,
-                time: e.startTime,
-            }));
-
-        for (const trg of candidateTargets) {
-            const endBar = trg.bar - 1;
-            const startBar = endBar - 3;
-            if (startBar < 1) continue;
-
-            const sIdx = startBar - 1;
-            const eIdx = endBar - 1;
-            if (eIdx >= nHighScore.length) continue;
-
-            const eStart = nHighScore[sIdx];
-            const eEnd   = nHighScore[eIdx];
-            const rise   = eEnd - eStart;
-
-            let monotonic = 0;
-            for (let i = sIdx + 1; i <= eIdx; i++) {
-                if (nHighScore[i] >= nHighScore[i - 1] - 0.02) monotonic++;
+            if (isRising && noHeavyBass) {
+                if (riserStart === -1) riserStart = b - 1;
+                riserLen++;
+            } else {
+                // Если разгон длился хотя бы 2 блока (8 баров)
+                if (riserLen >= 2) {
+                    const ts = APP.offset + (riserStart * blockSamples) / sr;
+                    const te = APP.offset + (b * blockSamples) / sr;
+                    const eStart = parseFloat(nRms[riserStart].toFixed(2));
+                    const eEnd   = parseFloat(nRms[b-1].toFixed(2));
+                    
+                    // Проверка: энергия реально выросла?
+                    if (eEnd > eStart) {
+                        pushRange('riser', ts, te, {
+                            intensity: eEnd,
+                            confidence: riserLen >= 4 ? 'high' : 'mid',
+                            energyStart: eStart,
+                            energyEnd: eEnd,
+                        });
+                    }
+                }
+                riserStart = -1;
+                riserLen = 0;
             }
-
-            const good =
-                rise > 0.16 &&
-                eEnd > 0.35 &&
-                monotonic >= 2;
-
-            if (!good) continue;
-
-            const ts = APP.offset + (sIdx * barDur);
-            const te = APP.offset + ((eIdx + 1) * barDur);
-
-            pushRange('riser', ts, te, {
-                intensity: (eStart + eEnd) / 2,
-                confidence: rise > 0.24 ? 'high' : 'mid',
-                energyStart: parseFloat(eStart.toFixed(2)),
-                energyEnd: parseFloat(eEnd.toFixed(2)),
-            });
         }
     }
-
+    
+    
+    
     // ── snare rolls: accelerating hit density before impact ──
     {
         const stepPerBar = Math.round(barDur / envStepSec);
