@@ -459,23 +459,64 @@ function detectEvents(features, kickData) {
                 energyEnd: parseFloat(m3.toFixed(2)),
             });
 
-            // drum fill — последние ~1 бар перед impact, если плотность очень высокая
-            const fillStart = Math.max(startStep, endStep - stepPerBar);
-            const fillMean = mean(nSnareEnv.slice(fillStart, endStep));
-            if (fillMean > 0.40) {
-                pushRange('drum_fill',
-                    APP.offset + fillStart * envStepSec,
-                    APP.offset + endStep   * envStepSec,
-                    {
-                        intensity: fillMean,
-                        confidence: 'mid',
-                        energyStart: parseFloat(fillMean.toFixed(2)),
-                        energyEnd: parseFloat(fillMean.toFixed(2)),
-                    }
-                );
+      // ── drum_fills: Анализ последних 1-2 баров перед сменой квадрата ──
+    {
+        // В DnB фразы идут по 16 баров.
+        for (let b = 1; b < numBlocks; b++) {
+            // Проверяем "провал" в басе и скачок плотности транзиентов 
+            // Это часто случается прямо перед дропом или сменой части
+            const dropInSub = nSub[b] < nSub[b-1] - 0.2;
+            const highFlux = nFlux[b] > 0.4;
+            
+            if (dropInSub && highFlux) {
+                // Вычисляем точное время блока
+                const ts = APP.offset + (b * blockSamples) / sr;
+                const te = APP.offset + ((b + 1) * blockSamples) / sr;
+                
+                // Snap к сетке. Если это попадает на 15-16 бар фразы — это 100% сбивка.
+                const bar = timeToBar(ts);
+                if (bar % 16 >= 14 || bar % 16 === 0) {
+                     pushRange('drum_fill', ts, te, {
+                        intensity: nFlux[b],
+                        confidence: 'high',
+                        energyStart: parseFloat(nRms[b-1].toFixed(2)),
+                        energyEnd: parseFloat(nRms[b].toFixed(2)),
+                    });
+                }
             }
         }
     }
+    
+    // ── kick_rolls: Быстрое ускорение бочки (IOI < 150ms) ──
+    {
+        if (kickTimes.length > 4) {
+            let rollStartIdx = -1;
+            let rollCount = 0;
+
+            for (let i = 1; i < kickTimes.length; i++) {
+                const ioi = kickTimes[i] - kickTimes[i-1];
+                
+                // В DnB (174 BPM) 1/8 доля = ~172мс. Меньше 150мс = ролл 1/16 или 1/32
+                if (ioi > 0.04 && ioi < 0.15) { 
+                    if (rollStartIdx === -1) rollStartIdx = i - 1;
+                    rollCount++;
+                } else {
+                    if (rollCount >= 3) { // Минимум 4 удара подряд с высокой скоростью
+                        const ts = kickTimes[rollStartIdx];
+                        const te = kickTimes[i-1];
+                        pushRange('snare_roll', ts, te + 0.1, { // Можно использовать твой тип snare_roll или добавить kick_roll
+                            intensity: 0.9,
+                            confidence: rollCount >= 6 ? 'high' : 'mid'
+                        });
+                    }
+                    rollStartIdx = -1;
+                    rollCount = 0;
+                }
+            }
+        }
+    }
+    
+    
 
     // ── bridge candidates ──
     {
