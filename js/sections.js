@@ -84,19 +84,14 @@ function buildSections(features, kickDensity) {
     const sr = APP.audioBuffer.sampleRate;
 
     const normalize = arr => {
-        let max = 0;
-        for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
-        max = max || 1;
-        return Array.from(arr, v => v / max);
-    };
-
-    const nRms  = normalize(rms);
-    const nSub  = normalize(sub);
-    const nHigh = normalize(high);
-    const nFlux = normalize(flux);
-    const nKick = kickDensity ? Array.from(kickDensity) : new Array(numBlocks).fill(0);
-
-    const macro = new Array(numBlocks).fill('INTRO');
+        // Вычисляем средние значения (Thresholds)
+    let avgSub = 0, avgRms = 0;
+    for (let i = 0; i < numBlocks; i++) {
+        avgSub += nSub[i];
+        avgRms += nRms[i];
+    }
+    avgSub /= numBlocks;
+    avgRms /= numBlocks;
 
     // coarse classification on 4-bar blocks
     for (let i = 0; i < numBlocks; i++) {
@@ -105,23 +100,31 @@ function buildSections(features, kickDensity) {
         const h = nHigh[i];
         const k = nKick[i];
 
-        const nearStart = i < 2;
-        const nearEnd   = i >= numBlocks - 2;
+        const nearStart = i < 4; // Intro в DnB обычно длинные (16-32 такта = 4-8 блоков)
+        const nearEnd   = i >= numBlocks - 4;
 
-        if (nearStart && r < 0.45 && k < 0.28) {
-            macro[i] = 'INTRO';
-        } else if (nearEnd && r < 0.60 && s < 0.55) {
-            macro[i] = 'OUTRO';
-        } else if (r > 0.70 && s > 0.58 && k > 0.38) {
+        // Если Sub и RMS сильно выше среднего по треку -> DROP
+        const isDrop = r > (avgRms * 1.2) && s > Math.max(0.4, avgSub * 1.2);
+        
+        // Breakdown - саба почти нет, кика почти нет
+        const isBreakdown = s < (avgSub * 0.5) && k < 0.2;
+
+        if (isDrop) {
             macro[i] = 'DROP';
-        } else if (r < 0.35 && s < 0.25 && h > 0.18) {
-            macro[i] = 'BREAKDOWN';
-        } else if (r > 0.42 && r < 0.75 && (h > 0.22 || nFlux[i] > 0.20)) {
+        } else if (isBreakdown && !nearStart && !nearEnd) {
+            // Если есть высокие (вокал/пэды) - это Breakdown. Если тишина - то Bridge/Break
+            macro[i] = h > 0.3 ? 'BREAKDOWN' : 'BRIDGE';
+        } else if (nearStart && !isDrop) {
+            macro[i] = 'INTRO';
+        } else if (nearEnd && !isDrop) {
+            macro[i] = 'OUTRO';
+        } else if (r > avgRms && h > 0.4) {
             macro[i] = 'BUILDUP';
         } else {
             macro[i] = 'BRIDGE';
         }
     }
+    
 
     // smooth pass
     for (let i = 1; i < numBlocks - 1; i++) {
