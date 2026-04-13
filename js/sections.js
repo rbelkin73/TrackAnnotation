@@ -1,456 +1,179 @@
 // ═══════════════════════════════════════════════
-// SECTIONS — анализ структуры + рендер списка
+// SECTIONS — анализ структуры (STRICT 16-BAR MACRO)
 // ═══════════════════════════════════════════════
 
-// ─── Extract features — СИНХРОННО, без OfflineAudioContext ──
-
 function extractFeatures() {
-    const sr           = APP.audioBuffer.sampleRate;
-    const ch           = APP.audioBuffer.getChannelData(0);
-    const total        = ch.length;
-    const barSamples   = Math.round(sr * (60 / APP.bpm) * 4);
-    const blockSamples = barSamples * 4;
-    const numBlocks    = Math.floor(total / blockSamples);
+    const sr = APP.audioBuffer.sampleRate;
+    const ch = APP.audioBuffer.getChannelData(0);
+    const total = ch.length;
+    
+    // ВАЖНО: Анализируем по 1 бару для большей точности
+    const barSamples = Math.round(sr * (60 / APP.bpm) * 4);
+    const blockSamples = barSamples; // 1 блок = 1 бар
+    const numBlocks = Math.floor(total / blockSamples);
 
-    const rms  = new Float32Array(numBlocks);
-    const sub  = new Float32Array(numBlocks);
+    const rms = new Float32Array(numBlocks);
+    const sub = new Float32Array(numBlocks);
     const high = new Float32Array(numBlocks);
     const flux = new Float32Array(numBlocks);
-    const mid  = new Float32Array(numBlocks);
 
-    // IIR фильтры
-    const rcSub  = Math.exp(-2 * Math.PI * 80   / sr);
-    const rcMid  = Math.exp(-2 * Math.PI * 2000 / sr);
-
-    const subBuf  = new Float32Array(total);
-    const midBuf  = new Float32Array(total);
-    const highBuf = new Float32Array(total);
+    // Псевдо-IIR 2-го порядка для более четкого разделения
+    const rcSub = Math.exp(-2 * Math.PI * 90 / sr);
+    const rcHigh = Math.exp(-2 * Math.PI * 3000 / sr);
 
     let ySub1 = 0, ySub2 = 0;
-    let yMid1 = 0, yMid2 = 0;
-    
-    for (let i = 0; i < total; i++) {
-        const x  = ch[i];
-        
-        // Двойной проход для более крутого среза (псевдо 2-pole)
-        ySub1 = rcSub * ySub1 + (1 - rcSub) * x;
-        ySub2 = rcSub * ySub2 + (1 - rcSub) * ySub1;
-        
-        yMid1 = rcMid * yMid1 + (1 - rcMid) * x;
-        yMid2 = rcMid * yMid2 + (1 - rcMid) * yMid1;
-        
-        subBuf[i]  = ySub2; 
-        midBuf[i]  = yMid2 - ySub2; // Только середина
-        highBuf[i] = x - yMid2;     // Только верха
-    }
-    
-    
-    let prevSubRms = 0, prevMidRms = 0, prevHighRms = 0;
+    let yHigh1 = 0, yHigh2 = 0;
+    let prevSpectrumSum = 0;
 
     for (let b = 0; b < numBlocks; b++) {
         const start = b * blockSamples;
-        const end   = Math.min(start + blockSamples, total);
-        const len   = end - start;
+        const end = Math.min(start + blockSamples, total);
+        const len = end - start;
 
-        let sumRms = 0, sumSub = 0, sumMid = 0, sumHigh = 0;
+        let sumRms = 0, sumSub = 0, sumHigh = 0;
+        
         for (let i = start; i < end; i++) {
-            sumRms  += ch[i]      * ch[i];
-            sumSub  += subBuf[i]  * subBuf[i];
-            sumMid  += midBuf[i]  * midBuf[i];
-            sumHigh += highBuf[i] * highBuf[i];
+            const x = ch[i];
+            
+            // Фильтры
+            ySub1 = rcSub * ySub1 + (1 - rcSub) * x;
+            ySub2 = rcSub * ySub2 + (1 - rcSub) * ySub1;
+            
+            yHigh1 = rcHigh * yHigh1 + (1 - rcHigh) * x;
+            yHigh2 = rcHigh * yHigh2 + (1 - rcHigh) * yHigh1;
+            const highSignal = x - yHigh2;
+
+            sumRms += x * x;
+            sumSub += ySub2 * ySub2;
+            sumHigh += highSignal * highSignal;
         }
 
-        rms[b]  = Math.sqrt(sumRms  / len);
-        sub[b]  = Math.sqrt(sumSub  / len);
-        mid[b]  = Math.sqrt(sumMid  / len);
+        rms[b] = Math.sqrt(sumRms / len);
+        sub[b] = Math.sqrt(sumSub / len);
         high[b] = Math.sqrt(sumHigh / len);
 
-        flux[b] = Math.abs(sub[b]  - prevSubRms)  * 1.5 +
-                  Math.abs(mid[b]  - prevMidRms)  * 1.0 +
-                  Math.abs(high[b] - prevHighRms) * 0.5;
-
-        prevSubRms  = sub[b];
-        prevMidRms  = mid[b];
-        prevHighRms = high[b];
+        // Упрощенный Flux (разница энергии с предыдущим баром)
+        const currentSum = rms[b] + sub[b] + high[b];
+        flux[b] = b === 0 ? 0 : Math.max(0, currentSum - prevSpectrumSum);
+        prevSpectrumSum = currentSum;
     }
 
-    return { rms, sub, high, flux, mid, numBlocks, blockSamples };
+    return { rms, sub, high, flux, numBlocks, blockSamples };
 }
 
-// ─── Build sections ───────────────────────────────
 
 function buildSections(features, kickDensity) {
-    const { rms, sub, high, flux, numBlocks, blockSamples } = features;
+    const { rms, sub, high, numBlocks, blockSamples } = features;
     const sr = APP.audioBuffer.sampleRate;
 
     const normalize = arr => {
-        // Вычисляем средние значения (Thresholds)
-    let avgSub = 0, avgRms = 0;
-    for (let i = 0; i < numBlocks; i++) {
-        avgSub += nSub[i];
-        avgRms += nRms[i];
-    }
-    avgSub /= numBlocks;
-    avgRms /= numBlocks;
-
-    // coarse classification on 4-bar blocks
-    for (let i = 0; i < numBlocks; i++) {
-        const r = nRms[i];
-        const s = nSub[i];
-        const h = nHigh[i];
-        const k = nKick[i];
-
-        const nearStart = i < 4; // Intro в DnB обычно длинные (16-32 такта = 4-8 блоков)
-        const nearEnd   = i >= numBlocks - 4;
-
-        // Если Sub и RMS сильно выше среднего по треку -> DROP
-        const isDrop = r > (avgRms * 1.2) && s > Math.max(0.4, avgSub * 1.2);
-        
-        // Breakdown - саба почти нет, кика почти нет
-        const isBreakdown = s < (avgSub * 0.5) && k < 0.2;
-
-        if (isDrop) {
-            macro[i] = 'DROP';
-        } else if (isBreakdown && !nearStart && !nearEnd) {
-            // Если есть высокие (вокал/пэды) - это Breakdown. Если тишина - то Bridge/Break
-            macro[i] = h > 0.3 ? 'BREAKDOWN' : 'BRIDGE';
-        } else if (nearStart && !isDrop) {
-            macro[i] = 'INTRO';
-        } else if (nearEnd && !isDrop) {
-            macro[i] = 'OUTRO';
-        } else if (r > avgRms && h > 0.4) {
-            macro[i] = 'BUILDUP';
-        } else {
-            macro[i] = 'BRIDGE';
-        }
-    }
-    
-
-    // smooth pass
-    for (let i = 1; i < numBlocks - 1; i++) {
-        if (macro[i - 1] === macro[i + 1] && macro[i] !== macro[i - 1]) {
-            macro[i] = macro[i - 1];
-        }
-    }
-
-    // convert to segments
-    const raw = [];
-    let start = 0;
-    let cur   = macro[0];
-
-    for (let i = 1; i <= numBlocks; i++) {
-        const t = i < numBlocks ? macro[i] : null;
-        if (t !== cur) {
-            raw.push({
-                type: cur,
-                startBlock: start,
-                endBlock: i - 1,
-            });
-            start = i;
-            cur = t;
-        }
-    }
-
-    // merge too-small macro segments
-    const mergedMacro = [];
-    for (const seg of raw) {
-        const size = seg.endBlock - seg.startBlock + 1;
-        if (size < 2 && mergedMacro.length) {
-            mergedMacro[mergedMacro.length - 1].endBlock = seg.endBlock;
-        } else {
-            mergedMacro.push({ ...seg });
-        }
-    }
-
-    // split each macro section into subsections by stable energy/groove changes
-    const out = [];
-
-    for (const seg of mergedMacro) {
-        const blocks = [];
-        for (let b = seg.startBlock; b <= seg.endBlock; b++) {
-            blocks.push({
-                b,
-                rms:  nRms[b],
-                sub:  nSub[b],
-                high: nHigh[b],
-                kick: nKick[b],
-            });
-        }
-
-        const splitPoints = [];
-
-        // split when stable layer change persists >= 2 macro blocks (8 bars)
-        for (let i = 1; i < blocks.length - 1; i++) {
-            const prev = blocks[i - 1];
-            const cur  = blocks[i];
-            const next = blocks[i + 1];
-
-            const jumpKick = (cur.kick - prev.kick) > 0.12 && (next.kick - prev.kick) > 0.08;
-            const jumpSub  = (cur.sub  - prev.sub)  > 0.10 && (next.sub  - prev.sub)  > 0.06;
-            const jumpRms  = (cur.rms  - prev.rms)  > 0.08 && (next.rms  - prev.rms)  > 0.05;
-            const dropKick = (prev.kick - cur.kick) > 0.12 && (prev.kick - next.kick) > 0.08;
-
-            if (jumpKick || jumpSub || jumpRms || dropKick) {
-                splitPoints.push(cur.b);
-            }
-        }
-
-        const uniqSplits = [...new Set(splitPoints)]
-            .filter(b => b > seg.startBlock && b <= seg.endBlock);
-
-        let ss = seg.startBlock;
-        let phase = 1;
-
-        for (const sp of uniqSplits.concat([seg.endBlock + 1])) {
-            const ee = sp - 1;
-
-            let sumR = 0, sumS = 0;
-            for (let b = ss; b <= ee; b++) {
-                sumR += nRms[b];
-                sumS += nSub[b];
-            }
-
-            const count = ee - ss + 1;
-            const energyLevel = parseFloat(Math.min(1, (sumR / count) * 0.6 + (sumS / count) * 0.4).toFixed(2));
-
-            const startTime = APP.offset + (ss * blockSamples) / sr;
-            const endTime   = APP.offset + ((ee + 1) * blockSamples) / sr;
-            const startBar  = timeToBar(startTime);
-            const endBar    = Math.max(startBar, timeToBar(endTime) - 1);
-
-            let labelBase = SECTION_TYPES[seg.type]?.label || seg.type;
-            let label = labelBase;
-
-            const macroLength = seg.endBlock - seg.startBlock + 1;
-            if (macroLength >= 3) {
-                label = `${labelBase} ${phase}`;
-            }
-
-            out.push({
-                type: seg.type,
-                label,
-                startTime,
-                endTime,
-                startBar,
-                endBar,
-                energyLevel,
-                confidence: count >= 2 ? 'high' : 'mid',
-            });
-
-            ss = sp;
-            phase++;
-        }
-    }
-
-    // final polish
-    if (out.length) {
-        out[0].type = 'INTRO';
-        out[out.length - 1].type = 'OUTRO';
-    }
-
-    return out;
-}
-// ═══════════════════════════════════════════════
-// RENDER SECTIONS LIST
-// ═══════════════════════════════════════════════
-
-function renderSectionsList() {
-    const list = document.getElementById('sectionsList');
-    list.innerHTML = '';
-
-    if (APP.sections.length === 0) {
-        list.innerHTML = '<div class="empty-state">No sections detected</div>';
-        return;
-    }
-
-    APP.sections.forEach((s, idx) => {
-        renderSectionRow(s, idx, list);
-        if (idx < APP.sections.length - 1) {
-            list.appendChild(makeAddSectionBtn(idx));
-        }
-    });
-}
-
-function renderSectionRow(s, idx, container) {
-    const info = SECTION_TYPES[s.type] || SECTION_TYPES.INTRO;
-    const row  = document.createElement('div');
-    row.className = 'section-row';
-
-    const colorBar            = document.createElement('div');
-    colorBar.className        = 'section-color-bar';
-    colorBar.style.background = info.color;
-
-    const typeSelect = document.createElement('select');
-    typeSelect.className = 'section-type-select';
-    SECTION_OPTIONS.forEach(opt => {
-        const o         = document.createElement('option');
-        o.value         = opt;
-        o.textContent   = SECTION_TYPES[opt].label;
-        if (opt === s.type) o.selected = true;
-        typeSelect.appendChild(o);
-    });
-    typeSelect.addEventListener('change', e => {
-        APP.sections[idx].type        = e.target.value;
-        colorBar.style.background     = SECTION_TYPES[e.target.value].color;
-        drawSectionTimeline();
-    });
-
-    // startBar
-    const startBarEl     = document.createElement('input');
-    startBarEl.type      = 'number';
-    startBarEl.className = 'bar-input';
-    startBarEl.value     = s.startBar;
-    if (idx === 0) startBarEl.readOnly = true;
-    startBarEl.addEventListener('change', e => {
-        const minVal  = idx === 0 ? 1 : APP.sections[idx-1].endBar + 1;
-        const maxVal  = s.endBar - 1;
-        const clamped = Math.max(minVal, Math.min(maxVal, parseInt(e.target.value) || minVal));
-        e.target.value = clamped;
-        APP.sections[idx].startBar  = clamped;
-        APP.sections[idx].startTime = barToTime(clamped);
-        if (idx > 0) {
-            APP.sections[idx-1].endBar  = clamped - 1;
-            APP.sections[idx-1].endTime = barToTime(clamped);
-        }
-        drawSectionTimeline();
-        renderSectionsList();
-    });
-
-    const arrow           = document.createElement('span');
-    arrow.textContent     = '→';
-    arrow.style.cssText   = 'color:#475569;font-size:13px;flex-shrink:0';
-
-    // endBar
-    const endBarEl     = document.createElement('input');
-    endBarEl.type      = 'number';
-    endBarEl.className = 'bar-input';
-    endBarEl.value     = s.endBar;
-    if (idx === APP.sections.length - 1) endBarEl.readOnly = true;
-    endBarEl.addEventListener('change', e => {
-        const minVal  = s.startBar + 1;
-        const maxVal  = idx < APP.sections.length - 1
-            ? APP.sections[idx+1].endBar - 1
-            : s.endBar;
-        const clamped = Math.max(minVal, Math.min(maxVal, parseInt(e.target.value) || minVal));
-        e.target.value = clamped;
-        APP.sections[idx].endBar  = clamped;
-        APP.sections[idx].endTime = barToTime(clamped + 1);
-        if (idx < APP.sections.length - 1) {
-            APP.sections[idx+1].startBar  = clamped + 1;
-            APP.sections[idx+1].startTime = barToTime(clamped + 1);
-        }
-        drawSectionTimeline();
-        renderSectionsList();
-    });
-
-    // время (read-only)
-    const timeEl       = document.createElement('div');
-    timeEl.className   = 'section-time';
-    timeEl.textContent = `${formatTime(s.startTime)} – ${formatTime(s.endTime)}`;
-
-    // energy level
-    const energyEl       = document.createElement('div');
-    energyEl.className   = 'event-intensity';
-    energyEl.textContent = `E:${s.energyLevel || 0}`;
-
-    // confidence badge
-    const badge       = document.createElement('span');
-    badge.className   = `confidence-badge conf-${s.confidence}`;
-    badge.textContent = s.confidence.toUpperCase();
-
-    // label
-    const labelInput       = document.createElement('input');
-    labelInput.type        = 'text';
-    labelInput.className   = 'section-label-input';
-    labelInput.placeholder = 'Label';
-    labelInput.value       = s.label || '';
-    labelInput.addEventListener('input', e => {
-        APP.sections[idx].label = e.target.value;
-        drawSectionTimeline();
-    });
-
-    // jump
-    const jumpBtn       = document.createElement('button');
-    jumpBtn.className   = 'section-jump';
-    jumpBtn.textContent = '▶';
-    jumpBtn.title       = 'Jump to section';
-    jumpBtn.addEventListener('click', () => seekTo(s.startTime));
-
-    // delete
-    const delBtn       = document.createElement('button');
-    delBtn.className   = 'section-delete';
-    delBtn.textContent = '×';
-    delBtn.addEventListener('click', () => deleteSection(idx));
-
-    // bar wrapper
-    const barWrap         = document.createElement('div');
-    barWrap.style.cssText = 'display:flex;align-items:center;gap:4px;flex-shrink:0';
-    barWrap.appendChild(startBarEl);
-    barWrap.appendChild(arrow);
-    barWrap.appendChild(endBarEl);
-
-    row.appendChild(colorBar);
-    row.appendChild(typeSelect);
-    row.appendChild(barWrap);
-    row.appendChild(timeEl);
-    row.appendChild(energyEl);
-    row.appendChild(badge);
-    row.appendChild(labelInput);
-    row.appendChild(jumpBtn);
-    row.appendChild(delBtn);
-    container.appendChild(row);
-}
-
-function makeAddSectionBtn(afterIdx) {
-    const wrap      = document.createElement('div');
-    wrap.className  = 'add-section-btn-wrap';
-    const btn       = document.createElement('button');
-    btn.className   = 'add-section-btn';
-    btn.textContent = '+';
-    btn.title       = 'Add section here';
-    btn.addEventListener('click', () => addSectionAfter(afterIdx));
-    wrap.appendChild(btn);
-    return wrap;
-}
-
-function deleteSection(idx) {
-    if (APP.sections.length <= 1) return;
-    APP.sections.splice(idx, 1);
-    for (let i = 0; i < APP.sections.length; i++) {
-        if (i === 0) {
-            APP.sections[i].startBar  = 1;
-            APP.sections[i].startTime = barToTime(1);
-        } else {
-            APP.sections[i].startBar  = APP.sections[i-1].endBar + 1;
-            APP.sections[i].startTime = barToTime(APP.sections[i].startBar);
-        }
-    }
-    const last    = APP.sections[APP.sections.length - 1];
-    last.endTime  = APP.duration;
-    last.endBar   = timeToBar(APP.duration) - 1;
-    renderSectionsList();
-    drawSectionTimeline();
-}
-
-function addSectionAfter(afterIdx) {
-    const prev        = APP.sections[afterIdx];
-    const next        = APP.sections[afterIdx + 1];
-    const newStartBar = prev.endBar + 1;
-    const newEndBar   = Math.min(newStartBar + 15, next.endBar - 1);
-    if (newEndBar <= newStartBar) return;
-    const newSec = {
-        startBar:    newStartBar,
-        endBar:      newEndBar,
-        startTime:   barToTime(newStartBar),
-        endTime:     barToTime(newEndBar + 1),
-        type:        'TRANSITION',
-        label:       '',
-        energyLevel: 0.5,
-        confidence:  'low',
+        let max = Math.max(...arr) || 1;
+        return Array.from(arr, v => v / max);
     };
-    next.startBar  = newEndBar + 1;
-    next.startTime = barToTime(next.startBar);
-    APP.sections.splice(afterIdx + 1, 0, newSec);
-    renderSectionsList();
-    drawSectionTimeline();
+
+    const nRms = normalize(rms);
+    const nSub = normalize(sub);
+
+    // 1. Вычисляем глобальные средние по треку
+    const avgRms = nRms.reduce((a, b) => a + b, 0) / numBlocks;
+    const avgSub = nSub.reduce((a, b) => a + b, 0) / numBlocks;
+
+    const phrases = [];
+    const barsPerPhrase = 16;
+    const numPhrases = Math.ceil(numBlocks / barsPerPhrase);
+
+    // 2. Группируем бары в 16-тактовые фразы (МАКРО-СТРУКТУРА)
+    for (let p = 0; p < numPhrases; p++) {
+        const startBarIdx = p * barsPerPhrase;
+        const endBarIdx = Math.min(startBarIdx + barsPerPhrase, numBlocks) - 1;
+        const phraseLen = endBarIdx - startBarIdx + 1;
+
+        if (phraseLen < 4) continue; // Игнорируем огрызки в конце
+
+        let pSub = 0, pRms = 0, pHigh = 0;
+        for (let b = startBarIdx; b <= endBarIdx; b++) {
+            pSub += nSub[b];
+            pRms += nRms[b];
+        }
+        pSub /= phraseLen;
+        pRms /= phraseLen;
+
+        // Жесткая логика классификации целой фразы
+        let type = 'BRIDGE';
+        
+        // Если саба и энергии сильно больше среднего - это DROP
+        if (pSub > avgSub * 1.1 && pRms > avgRms * 1.05) {
+            type = 'DROP';
+        } 
+        // Если саба мало, но общая энергия средняя - BREAKDOWN или BUILDUP
+        else if (pSub < avgSub * 0.7) {
+            type = pRms > avgRms * 0.8 ? 'BUILDUP' : 'BREAKDOWN';
+        } 
+        // Интро / Аутро
+        else if (p < 2 && pRms < avgRms) {
+            type = 'INTRO';
+        } 
+        else if (p >= numPhrases - 2 && pRms < avgRms) {
+            type = 'OUTRO';
+        }
+
+        phrases.push({
+            type,
+            startBar: startBarIdx + 1, // Бары с 1
+            endBar: endBarIdx + 1,
+            energyLevel: parseFloat(pRms.toFixed(2)),
+            subLevel: pSub
+        });
+    }
+
+    // 3. Сглаживание и объединение (Merge)
+    const sections = [];
+    let currentSec = null;
+    let typeCounter = {};
+
+    for (let i = 0; i < phrases.length; i++) {
+        const p = phrases[i];
+        
+        // Коррекция контекста: BUILDUP обычно идет ПЕРЕД DROP
+        if (p.type === 'BREAKDOWN' && phrases[i+1]?.type === 'DROP') {
+            p.type = 'BUILDUP';
+        }
+
+        if (!currentSec) {
+            currentSec = { ...p };
+        } else if (currentSec.type === p.type) {
+            currentSec.endBar = p.endBar;
+            currentSec.energyLevel = parseFloat(((currentSec.energyLevel + p.energyLevel) / 2).toFixed(2));
+        } else {
+            sections.push(currentSec);
+            currentSec = { ...p };
+        }
+    }
+    if (currentSec) sections.push(currentSec);
+
+    // 4. Форматирование результата для UI
+    return sections.map((sec, idx) => {
+        // Автонумерация
+        typeCounter[sec.type] = (typeCounter[sec.type] || 0) + 1;
+        const count = typeCounter[sec.type];
+        
+        const labelBase = SECTION_TYPES[sec.type]?.label || sec.type;
+        const label = count > 1 || sections.filter(s => s.type === sec.type).length > 1 
+            ? `${labelBase} ${count}` 
+            : labelBase;
+
+        const startTime = APP.offset + (sec.startBar - 1) * (60 / APP.bpm) * 4;
+        const endTime = APP.offset + sec.endBar * (60 / APP.bpm) * 4;
+
+        return {
+            type: sec.type,
+            label,
+            startBar: sec.startBar,
+            endBar: sec.endBar,
+            startTime,
+            endTime,
+            energyLevel: sec.energyLevel,
+            confidence: sec.endBar - sec.startBar >= 32 ? 'high' : 'mid',
+        };
+    });
 }
